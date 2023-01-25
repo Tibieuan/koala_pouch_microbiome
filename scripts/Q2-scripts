@@ -1,0 +1,568 @@
+##### import data via manifest file, denoising etc ######
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path KPMB_manifest.tsv \
+  --output-path KPMB-paired-end.qza \
+  --input-format PairedEndFastqManifestPhred33V2
+
+qiime demux summarize \
+  --i-data KPMB-paired-end.qza \
+  --o-visualization visualisations/KPMB-demux-qc.qzv
+  
+qiime vsearch join-pairs \
+  --i-demultiplexed-seqs KPMB-paired-end.qza \
+  --o-joined-sequences demux-joined.qza
+
+qiime demux summarize \
+  --i-data demux-joined.qza \
+  --o-visualization visualisations/demux-joined.qzv 
+  
+# denoise sequences and cluster into ASVs
+qiime deblur denoise-16S \
+  --i-demultiplexed-seqs demux-joined.qza \
+  --p-trim-length 450 \
+  --p-sample-stats \
+  --o-representative-sequences deblur-rep-seqs.qza \
+  --o-table deblur-table.qza \
+  --o-stats deblur-stats.qza
+
+#visualise feature-table
+qiime feature-table summarize \
+  --i-table deblur-table.qza \
+  --o-visualization visualisations/deblur-table.qzv \
+  --m-sample-metadata-file KPMB_metadata.tsv
+
+#visualise rep seqs
+qiime feature-table tabulate-seqs \
+  --i-data deblur-rep-seqs2.qza \
+  --o-visualization visualisations/deblur-rep-seqs2.qzv
+
+# Visualise denoising stats
+qiime metadata tabulate \
+  --m-input-file deblur-stats.qza \
+  --o-visualization visualisations/deblur-stats.qzv
+
+######classifier construction for taxonomic assignment######
+### 1. SILVA DB ###
+
+# retrieve the SILVA DB again with ranks that are consistent with NCBI
+qiime rescript get-silva-data \
+    --p-version '138' \
+    --p-target 'SSURef_NR99' \
+    --p-include-species-labels \
+    --p-ranks kingdom phylum class order family genus \
+    --o-silva-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs.qza \
+    --o-silva-taxonomy ~/pouchmb/silva/silva-138-ssu-nr99-tax.qza
+
+qiime rescript cull-seqs \
+    --i-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs.qza \
+    --o-clean-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-cleaned.qza
+
+qiime rescript filter-seqs-length-by-taxon \
+    --i-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-cleaned.qza \
+    --i-taxonomy ~/pouchmb/silva/silva-138-ssu-nr99-tax.qza \
+    --p-labels Archaea Bacteria Eukaryota \
+    --p-min-lens 900 1200 1400 \
+    --o-filtered-seqs ~/pouchmb/silva/silva-138-ssu-nr99-seqs-filt.qza \
+    --o-discarded-seqs ~/pouchmb/silva/silva-138-ssu-nr99-seqs-discard.qza 
+
+qiime rescript dereplicate \
+    --i-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-filt.qza  \
+    --i-taxa ~/pouchmb/silva/silva-138-ssu-nr99-tax.qza \
+    --p-rank-handles 'silva' \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-derep-uniq.qza \
+    --o-dereplicated-taxa ~/pouchmb/silva/silva-138-ssu-nr99-tax-derep-uniq.qza
+
+qiime feature-classifier extract-reads \
+    --i-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-derep-uniq.qza \
+    --p-f-primer CCTACGGGNGGCWGCAG \
+    --p-r-primer GGACTACNVGGGTWTCTAAT \
+    --p-n-jobs 10 \
+    --p-read-orientation 'forward' \
+    --o-reads ~/pouchmb/silva/silva-138-ssu-nr99-seqs-341-806-uniq.qza
+
+qiime rescript dereplicate \
+    --i-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-341-806-uniq.qza \
+    --i-taxa ~/pouchmb/silva/silva-138-ssu-nr99-tax-derep-uniq.qza \
+    --p-rank-handles 'silva' \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences ~/pouchmb/silva/silva-138-ssu-nr99-seqs-341-806-derep-uniq.qza \
+    --o-dereplicated-taxa  ~/pouchmb/silva/silva-138-ssu-nr99-tax-341-806-derep-uniq.qza
+
+qiime feature-classifier fit-classifier-naive-bayes \
+    --i-reference-reads ~/pouchmb/silva/silva-138-ssu-nr99-seqs-341-806-derep-uniq.qza \
+    --i-reference-taxonomy ~/pouchmb/silva/silva-138-ssu-nr99-tax-341-806-derep-uniq.qza \
+    --o-classifier ~/pouchmb/silva/silva-138-ssu-nr99-341-806-uniq-classifier.qza
+
+### now make NCBI classifier
+
+# Download ncbi 16S rRNA database 
+qiime rescript get-ncbi-data \
+    --p-query '33175[BioProject] OR 33317[BioProject]' \
+    --m-accession-ids-file ~/koalabacto/PG_NCBI.txt \
+    --o-sequences ncbi/ncbi-refseqs-unfiltered.qza \
+    --o-taxonomyncbi/ncbi-refseqs-taxonomy-unfiltered.qza
+
+# filter sequences by length - specify minimum and maximum as some whole genomes present
+qiime rescript filter-seqs-length-by-taxon \
+    --i-sequences ncbi/ncbi-refseqs-unfiltered.qza \
+    --i-taxonomy ncbi/ncbi-refseqs-taxonomy-unfiltered.qza \
+    --p-labels Archaea Bacteria \
+    --p-min-lens 900 1200 \
+    --p-max-lens 1800 2400 \
+    --o-filtered-seqs ncbi/ncbi-refseqs.qza \
+    --o-discarded-seqs ncbi/ncbi-refseqs-tooshortorlong.qza
+
+# remove sequences that were too long or too short
+qiime rescript filter-taxa \
+    --i-taxonomy ncbi/ncbi-refseqs-taxonomy-unfiltered.qza \
+    --m-ids-to-keep-file ncbi/ncbi-refseqs.qza \
+    --o-filtered-taxonomy ncbi/ncbi-refseqs-taxonomy.qza
+
+# evaluate performance of classifier
+qiime rescript evaluate-fit-classifier \
+    --i-sequences ncbi/ncbi-refseqs.qza \
+    --i-taxonomy ncbi/ncbi-refseqs-taxonomy.qza \
+    --o-classifier ncbi/ncbi-refseqs-classifier.qza \
+    --o-evaluation ncbi/ncbi-refseqs-classifier-evaluation.qzv \
+    --o-observed-taxonomy ncbi/ncbi-refseqs-predicted-taxonomy.qza
+
+# extract reads from classifier based on V3-V4 341F-806R primer pairs
+qiime feature-classifier extract-reads \
+    --i-sequences ncbi/ncbi-refseqs.qza \
+    --p-f-primer CCTACGGGNGGCWGCAG \
+    --p-r-primer GGACTACNVGGGTWTCTAAT \
+    --p-n-jobs 2 \
+    --p-read-orientation 'forward' \
+    --o-reads ncbi/ncbi-341-806.qza
+    
+# dereplicate based on unique strings
+qiime rescript dereplicate \
+    --i-sequences ncbi/ncbi-341-806.qza \
+    --i-taxa ncbi/ncbi-refseqs-taxonomy.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences ncbi/ncbi-341-806-seqs-uniq.qza \
+    --o-dereplicated-taxa ncbi/ncbi-341-806-tax-uniq.qza
+
+# train region specific classifier
+qiime feature-classifier fit-classifier-naive-bayes \
+    --i-reference-reads ncbi/ncbi-341-806-seqs-uniq.qza \
+    --i-reference-taxonomy ncbi/ncbi-341-806-tax-uniq.qza \
+    --o-classifier ncbi/ncbi-341-806-uniq-classifier.qza
+    
+# classifiers ready for downstream use!
+# use for taxonomic assignment
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier ~/pouchmb/silva/silva-138-ssu-nr99-341-806-uniq-classifier.qza \
+  --i-reads ~/pouchmb/deblur/deblur-rep-seqs.qza \
+  --o-classification ~/pouchmb/deblur/silva-tax-uniq.qza
+
+# merge taxa - follow gg database formatting for ease of use with NCBI tax
+qiime rescript merge-taxa \
+  --i-data ~/pouchmb/deblur/ncbi-tax-uniq.qza ~/pouchmb/deblur/silva-tax-uniq3.qza \
+  --p-mode 'len' \
+  --p-rank-handle-regex '^[dkpcofgs]__' \
+  --p-new-rank-handle 'greengenes' \
+  --o-merged-data ~/pouchmb/deblur/merged-sklearn-ncbi-silva-taxonomy.qza
+
+qiime metadata tabulate \
+  --m-input-file ~/pouchmb/deblur/merged-sklearn-ncbi-silva-taxonomy3.qza \
+  --o-visualization ~/pouchmb/deblur/vis/merged-sklearn-ncbi-silva-taxonomy3.qzv
+
+#validate with barplot
+qiime taxa barplot \
+  --i-table ~/pouchmb/deblur/deblur-table.qza \
+  --i-taxonomy ~/pouchmb/deblur/merged-sklearn-ncbi-silva-taxonomy3.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/deblur/vis/merged-sklearn-ncbi-silva-taxonomy-bars.qzv
+ 
+#### good to go mate #### 
+# but wait
+# we should probably clean things up and do a bit of decontamination
+
+##### processing/cleanup/decontamination using R ######
+
+library(microbiome)
+library(phyloseq)
+library(ggpubr)
+library(knitr)
+library(dplyr)
+library(RColorBrewer)
+library(qiime2R)
+
+# make a phyloseq object
+ps <- qza_to_phyloseq(features = "deblur-table.qza", tree = "rooted-tree.qza", taxonomy = "merged-sklearn-ncbi-silva-taxonomy2.qza", metadata = "koalabacto_md.tsv") 
+ps # inspect
+
+# accessing the OTUids 
+taxa_names(ps)[1:5] # print first 5 ids
+# find and substitute
+taxa_names(ps) <- gsub(taxa_names(ps), pattern = "d__", replacement = "")  
+
+# Check again Taxonomy table
+phyloseq::tax_table(ps)[1:18,1:3] # check for my table show me [1 to 3 otu ids, 1 to 3 first three ranks]. 
+
+taxa_names(ps)[1:18] # print first 5 names
+
+# extending gsub to entire table 
+tax_table(ps)[, colnames(tax_table(ps))] <- gsub(tax_table(ps)[, colnames(tax_table(ps))],     pattern = "[a-z]__", replacement = "")
+
+colnames(tax_table(ps))
+
+phyloseq::tax_table(ps)[1:3,1:3] # check for my table show me [1 to 3 otu ids, 1 to 3 first three ranks].
+
+# replace inconsistent taxonomies
+tax_table(ps)[tax_table(ps) == "Bacteroidota"] <- "Bacteroidetes"
+tax_table(ps)[tax_table(ps) == "Verrucomicrobiota"] <- "Verrucomicrobia"
+tax_table(ps)[tax_table(ps) == "Planctomycetota"] <- "Plantomycetes"
+tax_table(ps)[tax_table(ps) == "Spirochaetota"] <- "Spirochaetes"
+tax_table(ps)[tax_table(ps) == "Acidobacteriota"] <- "Acidobacteria"
+tax_table(ps)[tax_table(ps) == "Actinobacteriota"] <- "Actinobacteria"
+phyloseq::tax_table(ps)[1:7,1:7] # check for my table show me [1 to 3 otu ids, 1 to 3 first three ranks].
+
+# remove unwanted samples with bad taxonomy
+to_remove <- c("CS-K2-AN-2", "CS-K1-PD-2", "CS-K12-PD-2", "DW-K8-AN-2")
+ps <- prune_samples(!(sample_names(ps) %in% to_remove), ps)
+ps # inspect
+
+# prune taxa that appear in no samples
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
+
+###### taxonomic decontamination using decontam package
+# Identification method = prevalence
+
+library(decontam)
+
+head(sample_data(ps)) # inspect phyloseq object 
+
+df <- as.data.frame(sample_data(ps)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=decontam.ctrl.status)) + geom_point()
+
+
+sample_data(ps)$is.neg <- sample_data(ps)$decontam.ctrl.status == "TRUE"
+contamdf.prev01 <- isContaminant(ps, method="prevalence", neg="is.neg", threshold = 0.1)
+table(contamdf.prev01$contaminant)
+
+head(which(contamdf.prev01$contaminant))
+write.csv(contamdf.prev01, "16s_deblur_contam_stats_01.csv")
+
+ps.pa <- transform_sample_counts(ps, function(abund) 1*(abund>0))
+ps.pa.neg <- prune_samples(sample_data(ps.pa)$decontam.ctrl.status == "TRUE", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$decontam.ctrl.status == "FALSE", ps.pa)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                    contaminant=contamdf.prev05$contaminant)
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+
+# remove contaminant taxa from dataset based on table contents and biological relevance 
+## 3 X streptococci, 1 X pelomonas, 1 X Ralstonia
+features_rmv <- c("7a9fc3eb16670780240cd01ab19dd23c", 
+                  "de7af6fe70d3dad52fc671c95b613f2c", 
+                  "a776a82c5251b6a8ba7f4edc81dacd71", 
+                  "f95bd9a92ac9e73251d9e06f1ddbdfb7", 
+                  "da95bdd7886f24ecd860302693b9446e")
+ps <- prune_taxa(!(taxa_names(ps) %in% features_rmv), ps)
+ps
+##########
+# decontamination is now complete 
+########## 
+# prepare the dataset for re-import into qiime2
+
+# Export taxonomy table as "tax.txt"
+tax<-as(tax_table(ps),"matrix")
+tax_cols <- colnames(tax)
+tax<-as.data.frame(tax)
+tax$taxonomy<-do.call(paste, c(tax[tax_cols], sep=";"))
+for(co in tax_cols) tax[co]<-NULL
+write.table(tax, "tax.txt", quote=FALSE, col.names=FALSE, sep="\t")
+
+
+# Export feature/OTU table as a biom file
+library(biomformat)
+
+otu<-(as(otu_table(ps),"matrix")) # 't' to transform if taxa_are_rows=FALSE
+#if taxa_are_rows=TRUE
+#otu<-as(otu_table(GlobalPatterns),"matrix"))
+otu_biom<-make_biom(data=otu)
+write_biom(otu_biom,"asv_biom.biom")
+
+# As a text file
+write.table(t(seqtab), "seqtab.txt", sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+#or from the phyloseq object, 't' to transform if taxa_are_rows=FALSE, no 't' if taxa_are_rows=TRUE
+#write.table(t(otu_table(ps), "seqtab.txt",sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+
+# make phyloseq object of just control samples
+ctrl.only <- subset_samples(ps, body.site == "CONTROL")
+ctrl.only
+
+# make phyloseq object without control samples
+ps.nc <- subset_samples(ps, control == "FALSE")
+ps.nc
+phyloseq::tax_table(ps.nc) [1:18]  #re-inspect taxonomy table
+
+# Extract abundance matrix from the phyloseq object for compositional analysis of functional predictions
+OTU1 = as(tax_table(ps.nc), "matrix")
+# transpose if necessary
+if(taxa_are_rows(ps.nc)){OTU1 <- t(OTU1)}
+# Coerce to data.frame
+OTUdf = as.data.frame(OTU1)
+write.csv(OTUdf, "ps-taxonomy.csv", quote=FALSE, col.names=TRUE, sep="\t")
+
+#################################
+## Back to qiime2 condaenv ##
+#################################
+
+# import ASV table back into qiime2
+qiime tools import \
+--input-path ~/pouchmb/asv_biom.biom \
+--type 'FeatureTable[Frequency]' \
+--input-format BIOMV100Format \
+--output-path ~/pouchmb/phyloseq-table.qza
+
+# import filtered taxonomy back into qiime2
+qiime tools import \
+--type 'FeatureData[Taxonomy]' \
+--input-format HeaderlessTSVTaxonomyFormat \
+--input-path ~/pouchmb/tax.txt \
+--output-path ~/pouchmb/phyloseq-taxonomy.qza 
+
+# perform a lot of filtering, with visualisations along the way
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/phyloseq-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[sample-type]='control'" \
+  --o-filtered-table ~/pouchmb/tables/control-filtered-table.qza
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/control-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/control-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/phyloseq-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[sample-type]='Biological'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/noctrl-filtered-allsamples-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[all-tp]='TRUE'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-all-tp-filtered-table.qza
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-all-tp-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-all-tp-filtered-table.qzv
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-all-tp-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-all-tp-filtered-bars.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[location]='DW'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-dw-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-dw-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-dw-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-dw-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-dw-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[location]='CWH'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-cs-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-cs-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-cs-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-cs-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-cs-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[breeding-group]='1'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-bg1-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-bg1-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-bg1-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-bg1-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-bg1-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[breeding-group]='2'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-bg2-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-bg2-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-bg2-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-bg2-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-bg2-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[reproductive-stage]='Loss'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-loss-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-loss-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-loss-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-loss-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-loss-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[reproductive-stage]='Anoestrus'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-AN-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-AN-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-AN-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-AN-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-AN-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[reproductive-stage]='VeryEarlyLactation'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-VEL-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-VEL-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-VEL-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-VEL-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-VEL-filtered-table.qzv
+
+qiime feature-table filter-samples \
+  --i-table ~/pouchmb/tables/noctrl-filtered-table.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --p-where "[reproductive-stage]='EarlyLactation'" \
+  --o-filtered-table ~/pouchmb/tables/noctrl-EL-filtered-table.qza
+
+qiime taxa barplot \
+  --i-table ~/pouchmb/tables/noctrl-EL-filtered-table.qza \
+  --i-taxonomy ~/pouchmb/phyloseq-taxonomy.qza \
+  --m-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-EL-filtered-bars.qzv
+
+qiime feature-table summarize \
+  --i-table ~/pouchmb/tables/noctrl-EL-filtered-table.qza \
+  --m-sample-metadata-file ~/pouchmb/koalabacto_md.tsv \
+  --o-visualization ~/pouchmb/tables/noctrl-EL-filtered-table.qzv
+
+########################################
+# time for diversity analysis (mmmyes) #
+########################################
+
+#run core metrics, generating some base plots
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny diversity/rooted-tree.qza \
+  --i-table tables/noctrl-filtered-table.qza \
+  --p-sampling-depth 1000 \
+  --m-metadata-file koalabacto_md.tsv \
+  --output-dir core-metrics-results
+
+#shannon div sig
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/shannon_vector.qza \
+  --m-metadata-file koalabacto_md.tsv \
+  --o-visualization core-metrics-results/shannon-group-significance.qzv
+
+#obs ASV sig
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/observed_features_vector.qza \
+  --m-metadata-file koalabacto_md.tsv \
+  --o-visualization core-metrics-results/obs-group-significance.qzv
+
+#faithpd sig
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file koalabacto_md.tsv \
+  --o-visualization core-metrics-results/faith_pd-group-significance.qzv
+
+#alpha curve for validaion purposes (not in paper)
+qiime diversity alpha-rarefaction \
+  --i-table tables/noctrl-filtered-table.qza \
+  --i-phylogeny diversity/rooted-tree.qza \
+  --p-max-depth 1000 \
+  --m-metadata-file koalabacto_md.tsv \
+  --o-visualization diversity/alpha-rare-curve.qzv
+
+#QUF beta group significance with 4000 permut
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file koalabacto_md.tsv \
+  --m-metadata-column 'reproductive-stage' \
+  --p-method 'anosim' \
+  --p-pairwise \
+  --p-permutations 4000 \
+  --o-visualization diversity/wuf_rf_anosim.qzv
+
+### Figures made using adobe illustrator based on .svg files from .qzv outputs of above tests
+
+
